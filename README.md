@@ -61,8 +61,6 @@ python -m playwright install chromium
 # python -m playwright install --with-deps chromium
 ```
 
----
-
 ## Uruchomienie (TUI)
 
 ```bash
@@ -89,7 +87,7 @@ Podczas skanowania zobaczysz w terminalu:
 | `--output`       | Plik CSV z wynikami                                                  |
 | `--config`       | Plik YAML z ustawieniami (patrz: [Tryb CLI + YAML](#tryb-cli--yaml)) |
 
----s
+---
 
 ## Tryb CLI + YAML
 
