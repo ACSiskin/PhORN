@@ -1,103 +1,191 @@
-# PhORN
-Asynchronous Python crawler to extract Polish phone numbers and optionally emails from a chosen domain. Curses-based UI, saves results to CSV with source domain, username, phone, email, and URL. Supports page limit, filtering, and pairing phone numbers with related emails.
+<!-- PHORN – README.md -->
 
-Asynchroniczny crawler w Pythonie do wyciągania polskich numerów telefonów i opcjonalnie e-maili z wybranej domeny. Interfejs w curses, zapis wyników do CSV z danymi: domena źródłowa, username, telefon, e-mail, URL. Obsługa limitu stron, filtrowanie i parowanie numerów z mailami.
+<div align="center">
 
-Funkcje
-> Skany w obrębie pojedynczej domeny (http/https).
+<picture>
+  <!-- Light mode -->
+  <source media="(prefers-color-scheme: light)" srcset="assets/phorn-logo-light.png">
+  <!-- Dark mode -->
+  <source media="(prefers-color-scheme: dark)"  srcset="assets/phorn-logo-dark.png">
+  <img alt="PHORN Logo" src="assets/phorn-logo-dark.png" width="560">
+</picture>
 
-> Telefony: tylko PL (9 cyfr lub +48 + 9 cyfr; separatory dopuszczone).
+**Terminal Phone & Email Crawler (TUI + Playwright)**
 
-> Maile: z tekstu i linków mailto: (opcjonalnie).
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
+[![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
+[![Status](https://img.shields.io/badge/OSINT-Tool-orange.svg)](#)
 
-> Parowanie telefon ↔ e-mail na poziomie jednej strony (najbliższy węzeł DOM).
+</div>
 
-> username tylko przy rekordach z telefonem (np. nagłówek strony/profilu).
+---
 
-> CSV z kolumnami: source_domain, username, phone, email, url.
+PHORN to terminalowy skaner stron WWW, który:
 
-> UI w curses: nagłówek przypięty, log przewijany, status na dole.
+- zbiera **numery telefonów (PL)** i **adresy e-mail** z witryny (w ramach jednej domeny),
+- radzi sobie z częścią blokad JS/WAF (fallback do **Playwright/Chromium**, **interactive unlock**, **HTTP/2**),
+- zapisuje wynik do **CSV**,
+- pokazuje **na żywo** postęp i statystyki w czytelnym interfejsie **curses** (TUI).
 
-> Łagodne zakończenie (Ctrl+C) z zapisem wyników.
+> ⚠️ Używaj zgodnie z prawem i regulaminami serwisów. Projekt ma charakter edukacyjny/OSINT.
 
-Wymagania (Linux)
-Python 3.10+ (zalecane 3.11)
+---
 
-Systemowe:
+## Wymagania
 
-`sudo apt update`
+- **Linux** (Debian/Ubuntu/Kali; inne dystrybucje też powinny działać).
+- **Python 3.10+** (zalecane 3.11/3.12/3.13).
+- Dostęp do Internetu; przy „trudnych” stronach — **HTTP/HTTPS proxy** (np. rezydencyjne).
+- ~1 GB miejsca (Playwright pobiera Chromium).
 
-`sudo apt install -y python3 python3-venv python3-pip`
+---
 
-`sudo apt install -y libncursesw5`
+## Instalacja (krok po kroku)
 
-`sudo apt install -y ca-certificates`
+```bash
+# 1) Pobierz repozytorium
+git clone https://github.com/TwojeKonto/phorn.git phorn
+cd phorn
 
-Pakiety Pythona:
+# 2) Utwórz i aktywuj środowisko wirtualne Pythona
+python3 -m venv .venv
+source .venv/bin/activate
 
-`python3 -m venv .venv`
+# 3) Zaktualizuj pip i zainstaluj zależności
+pip install -U pip wheel
+pip install aiohttp beautifulsoup4 playwright playwright-stealth "httpx[http2]" pyyaml tldextract rich pandas
 
-`source .venv/bin/activate`
+# 4) Pobierz przeglądarkę dla Playwright
+python -m playwright install chromium
+# Na Kali/starszych systemach (gdy brakuje bibliotek):
+# python -m playwright install --with-deps chromium
+```
 
-`pip install --upgrade pip`
-`pip install aiohttp beautifulsoup4`
+---
 
-(Opcjonalnie, TYLKO jeśli planujesz później dodać render JS) Playwright:
+## Uruchomienie (TUI)
 
-`pip install playwright`
-`playwright install chromium`
-> Uwaga: na Windows do curses potrzebny będzie pip install windows-curses (Linux nie wymaga).
+```bash
+python crawl_contacts.py --domain example.com --live --concurrency 8 --max-pages 200 --output out/contacts_example.csv
+```
 
-Struktura repo:
+Podczas skanowania zobaczysz w terminalu:
 
-`phorn/`
-  `__init__.py`
-  `types.py          # struktury danych`
-  
-  `extract.py        # regexy, parsowanie i łączenie phone↔email na stronie`
-  
-  `net.py            # sieć, normalizacja linków`
-  
-  `crawl.py          # główna pętla crawl + callbacki do UI`
-  
-  `ui_curses.py      # interfejs w terminalu (logo, log, status)`
-  
-`main.py             # punkt startowy (prompty, zapis CSV)`
+- postęp (%),
+- liczbę stron odwiedzonych i pozostałych,
+- liczbę znalezionych telefonów i e-maili,
+- czas trwania.
 
-`README.md`
+---
 
-ak to działa (skrót techniczny)
-Pobieramy HTML asynchronicznie (aiohttp), parsujemy BeautifulSoup.
+## Opcje skanera
 
-Telefony i maile wyszukiwane są w:
+| Parametr         | Opis                                                                 |
+|------------------|----------------------------------------------------------------------|
+| `--domain`       | Domena startowa (bez `http://` / `https://`). **Wymagane**           |
+| `--live`         | Użyj Playwright/Chromium do renderowania JS                          |
+| `--concurrency`  | Liczba równoległych pobrań (domyślnie: `4`)                          |
+| `--max-pages`    | Limit liczby stron do odwiedzenia                                    |
+| `--output`       | Plik CSV z wynikami                                                  |
+| `--config`       | Plik YAML z ustawieniami (patrz: [Tryb CLI + YAML](#tryb-cli--yaml)) |
 
-tekście strony,
+---
 
-linkach tel: / mailto:.
+## Tryb CLI + YAML
 
-Parowanie phone↔email odbywa się przez najbliższego wspólnego przodka w DOM (LCA) z progiem odległości (domyślnie 6).
+Możesz stworzyć plik `config.yaml`:
 
-username (np. nagłówek profilu/ogłoszenia) tylko wtedy, gdy na stronie znaleziono telefon.
+```yaml
+domain: example.com
+live: true
+concurrency: 8
+max_pages: 200
+output: out/results.csv
+```
 
-Parametry i rozszerzenia (dev)
-Normalizacja numerów – obecnie zostawiamy format “tak jak na stronie” (po lekkim czyszczeniu). Chcesz zawsze +48 123 456 789? Dodaj normalizację w extract.clean_phone().
+I uruchomić:
 
-Whitelist/Blacklist ścieżek – prosta modyfikacja w crawl.py przed queue.append(nxt).
+```bash
+python crawl_contacts.py --config config.yaml
+```
 
-Render JS – jeśli trafisz na treści ładowane JS (Snap/Cloudflare), dołóż opcjonalny fallback Playwrighta (mamy to gotowe w starszej wersji – można włączyć warunkowo).
+---
 
-Autosave/Resume – łatwo dodać zapis co X sekund i wznowienie z CSV.
+## Struktura projektu
 
-Problemy i rozwiązania
-Kursor/input “ucieka” w UI: upewnij się, że terminal ma UTF-8 i czcionkę monospace. W kodzie używamy locale.setlocale(LC_ALL, '') + rysujemy teksty przycinając do szerokości okna, więc nie powinno się zawijać (powiększ okno jeśli masz wąski terminal).
+```
+phorn/
+├── crawl_contacts.py    # Główny skrypt skanera
+├── utils/               # Pomocnicze moduły (regex, parser)
+├── out/                 # Domyślny katalog wyników
+└── README.md            # Ten plik
+```
 
-Brak wyników: część stron generuje dane JS-em. W tej bazowej wersji render JS jest wyłączony — rozważ włączenie fallbacku Playwright (patrz “Rozszerzenia”).
+---
 
-Za wolno: zwiększ limit równoległości w crawl.py (aktualnie pętla idzie sekwencyjnie), dodaj whitelistę ścieżek i wstępne filtry linków (odrzuć #, pliki .jpg/.png/.pdf/.zip/.css/.js, inne domeny).
+## Format wyników (CSV)
 
-Bezpieczeństwo i etyka
-Szanuj robots.txt i warunki serwisu.
+Plik CSV zawiera kolumny:
 
-Nie bombarduj jednego hosta — zostaw minimalny await asyncio.sleep(…) i rozsądne limity.
+- `url` — adres strony źródłowej
+- `phone` — numer telefonu
+- `email` — adres e-mail
+- `label` — kontekst w treści (opcjonalnie)
+- `timestamp` — data i godzina zapisu
 
-Dane kontaktowe traktuj zgodnie z prawem i politykami prywatności.
+---
+
+## Wydajność i dobre praktyki
+
+- Większa wartość `--concurrency` = szybsze skanowanie, ale większe obciążenie dla serwera.
+- `--live` jest wolniejsze niż tryb HTTP-only, ale lepiej radzi sobie z dynamicznymi stronami JS.
+- Szanuj plik `robots.txt` i regulaminy serwisów.
+- Przy dużych domenach rozważ podział skanu na kilka mniejszych sesji.
+
+---
+
+## Cloudflare / WAF — co działa, a co nie
+
+- Wiele prostych blokad JS przechodzi dzięki Playwright + stealth.
+- Bardziej zaawansowane WAF wymagają czasem interakcji (tryb „interactive unlock” w TUI).
+- CAPTCHA obrazkowe nie są omijane automatycznie.
+
+---
+
+## Rozwiązywanie problemów
+
+**Problem:** `playwright: command not found`  
+**Rozwiązanie:**  
+```bash
+python -m pip install playwright
+python -m playwright install --with-deps chromium
+```
+
+**Problem:** Błędy przy instalacji zależności systemowych  
+**Rozwiązanie:** upewnij się, że używasz `sudo` i masz aktualne repozytoria pakietów (`apt update`).
+
+**Problem:** Skrypt nie zapisuje wyników  
+**Rozwiązanie:** sprawdź, czy katalog `out/` istnieje i masz prawa zapisu.
+
+---
+
+## FAQ
+
+**Czy potrzebuję kluczy API?**  
+Nie — narzędzie działa na publicznych stronach.
+
+**Czy to legalne?**  
+Tak, jeśli zbierasz dane z własnych zasobów lub masz na to zgodę. Nie łam prawa ani regulaminów.
+
+**Czy narzędzie omija CAPTCHA/logowanie?**  
+Nie. Projekt nie omija zabezpieczeń wymagających uwierzytelnienia.
+
+**Czy działa na Windows/Mac?**  
+Tak, ale oficjalnie testowane jest na Linuxie.
+
+---
+
+## Licencja
+
+Projekt objęty licencją **Apache 2.0**.  
+Pełna treść licencji znajduje się w pliku [LICENSE](LICENSE).
