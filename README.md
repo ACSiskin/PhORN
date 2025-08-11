@@ -44,7 +44,7 @@ PHORN to terminalowy skaner stron WWW, który:
 
 ```bash
 # 1) Pobierz repozytorium
-git clone https://github.com/TwojeKonto/phorn.git phorn
+git clone https://github.com/ACSiskin/phorn.git phorn
 cd phorn
 
 # 2) Utwórz i aktywuj środowisko wirtualne Pythona
