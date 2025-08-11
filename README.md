@@ -89,7 +89,7 @@ Podczas skanowania zobaczysz w terminalu:
 | `--output`       | Plik CSV z wynikami                                                  |
 | `--config`       | Plik YAML z ustawieniami (patrz: [Tryb CLI + YAML](#tryb-cli--yaml)) |
 
----
+---s
 
 ## Tryb CLI + YAML
 
@@ -108,20 +108,6 @@ I uruchomić:
 ```bash
 python crawl_contacts.py --config config.yaml
 ```
-
----
-
-## Struktura projektu
-
-```
-phorn/
-├── crawl_contacts.py    # Główny skrypt skanera
-├── utils/               # Pomocnicze moduły (regex, parser)
-├── out/                 # Domyślny katalog wyników
-└── README.md            # Ten plik
-```
-
----
 
 ## Format wyników (CSV)
 
