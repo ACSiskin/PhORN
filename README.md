@@ -7,7 +7,7 @@
   <source media="(prefers-color-scheme: light)" srcset="assets/phorn-logo-light.png">
   <!-- Dark mode -->
   <source media="(prefers-color-scheme: dark)"  srcset="assets/phorn-logo-light.png">
-  <img alt="PHORN Logo" src="assets/phorn-logo-light.png" width="560">
+  <img alt="PHORN Logo" src="assets/phorn-logo-light.png" width="300">
 </picture>
 
 **Terminal Phone & Email Crawler (TUI + Playwright)**
