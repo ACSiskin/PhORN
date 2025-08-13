@@ -1,4 +1,4 @@
-# phorn/crawl.py
+ phorn/crawl.py
 import asyncio
 import re
 import time
@@ -10,11 +10,14 @@ import aiohttp
 from bs4 import BeautifulSoup
 
 try:
-    from .types import Hit
+    from .types import Hit, IPHit, FPEvent
 except Exception:
-    from .models import Hit
+    from .models import Hit, IPHit, FPEvent
 
-from .extract import PHONE_RE, EMAIL_RE, clean_phone, guess_username
+from .extract import (
+    PHONE_RE, EMAIL_RE, clean_phone, guess_username,
+    find_ips, detect_fingerprint_indicators
+)
 from .net import (
     fetch_html, fetch_html_aggr,
     same_domain, defrag_and_norm, detect_cloudflare, UA
@@ -198,19 +201,18 @@ async def _fetch_robots(session: aiohttp.ClientSession, domain: str, proxy: str 
     return rules
 
 def _robots_allowed(url: str, domain: str, rules: list[str]) -> bool:
-    # bardzo prosta implementacja – prefix match
     try:
         p = urlparse(url).path or "/"
     except Exception:
         return True
     for rule in rules:
-        if rule == "/":  # wszystko zablokowane
+        if rule == "/":
             return False
         if p.startswith(rule):
             return False
     return True
 
-# ------------ główny crawler (z równoległością) ------------
+# ------------ main crawler ------------
 async def crawl(
     domain: str,
     mode: int,
@@ -227,6 +229,9 @@ async def crawl(
     interactive_unlock: bool = False,
     on_detail = None,
     on_stats = None,
+    on_ip = None,
+    on_fp = None,
+    extras_only_on_phone: bool = False,
     interactive_timeout_s: int = 60,
     seed_cookie_header: str | None = None,
     bootstrap_headful_first: bool = False,
@@ -242,23 +247,25 @@ async def crawl(
     def detail(msg: str):
         if on_detail: on_detail(msg)
 
+    # no-op callbacks
+    if on_ip is None:
+        def on_ip(*_args, **_kw): ...
+    if on_fp is None:
+        def on_fp(*_args, **_kw): ...
+
     hits: list[Hit] = []
     scanned = found = errors = 0
 
-    # statystyki do UI
     uniq_phones, uniq_emails = set(), set()
     path_counter = Counter()
 
-    # kolejka i visited
     q: asyncio.Queue = asyncio.Queue()
     visited: set[str] = set()
     vlock = asyncio.Lock()
 
-    # regexy scope
     inc_re = re.compile(include_re) if include_re else None
     exc_re = re.compile(exclude_re) if exclude_re else None
 
-    # seed urls
     seeds = []
     if start_url: seeds.append((start_url, 0))
     seeds += [(f"https://{domain}/", 0), (f"http://{domain}/", 0)]
@@ -266,7 +273,6 @@ async def crawl(
 
     cookie_hdr: dict[str,str] = {}
 
-    # seed cookie: z UI lub z pliku
     if seed_cookie_header:
         _put_cookie(cookie_hdr, domain.lower(), seed_cookie_header); detail("cookies: seeded (UI)")
     if cookies_in_file:
@@ -279,27 +285,24 @@ async def crawl(
             detail(f"cookies import error: {e}")
 
     browser_ctx = None; pw = None
-    render_sem = asyncio.Semaphore(1)   # pojedyncze renderowanie
-    interact_sem = asyncio.Semaphore(1) # pojedyncze interactive
+    render_sem = asyncio.Semaphore(1)
+    interact_sem = asyncio.Semaphore(1)
 
     timeout = aiohttp.ClientTimeout(total=12, connect=6, sock_connect=6, sock_read=8)
     conn = aiohttp.TCPConnector(limit=max(20, 5*concurrency), ttl_dns_cache=300)
 
     async with aiohttp.ClientSession(timeout=timeout, connector=conn) as session:
 
-        # robots
         robots_rules = []
         if obey_robots:
             robots_rules = await _fetch_robots(session, domain, proxy, detail)
 
-        # pre-flight CF
         try:
             seed_url = start_url or f"https://{domain}/"
             if await detect_cloudflare(session, seed_url, proxy=proxy) and render_mode == 0:
                 render_mode = 1
         except Exception: pass
 
-        # sitemap seed
         if use_sitemap:
             try:
                 from .net import fetch_html as _fh
@@ -313,37 +316,18 @@ async def crawl(
                             await q.put((u,0))
             except Exception: pass
 
-        # bootstrap
-        if bootstrap_headful_first:
-            try:
-                seed = start_url or f"https://{domain}/"
-                detail("bootstrap: open browser first")
-                async with interact_sem:
-                    html2, ck_hdr = await _interactive_unlock(
-                        seed, proxy, timeout_s=interactive_timeout_s,
-                        on_detail=detail, domain_for_profile=domain,
-                    )
-                if ck_hdr:
-                    _put_cookie(cookie_hdr, _host_of(seed) or domain.lower(), ck_hdr)
-                    detail("bootstrap: cookies captured")
-            except Exception as e:
-                detail(f"bootstrap failed: {e}")
-
-        # pomocnicze pobieranie
         async def _get_html(u: str, extra_headers: dict[str,str] | None):
             if aggr_net:
                 return await fetch_html_aggr(u, proxy=proxy, extra_headers=extra_headers)
             else:
                 return await fetch_html(session, u, proxy=proxy, extra_headers=extra_headers)
 
-        # worker
         async def worker(wid:int):
             nonlocal scanned, found, errors, browser_ctx, pw
             while (scanned < max_pages):
                 try:
                     url, depth = await asyncio.wait_for(q.get(), timeout=1.0)
                 except asyncio.TimeoutError:
-                    # kolejka może być chwilowo pusta
                     if scanned >= max_pages: break
                     await asyncio.sleep(0.05)
                     continue
@@ -354,7 +338,6 @@ async def crawl(
                         continue
                     visited.add(url)
 
-                # scope filters
                 if inc_re and not inc_re.search(url): 
                     q.task_done(); on_status(scanned, q.qsize(), found, errors); continue
                 if exc_re and exc_re.search(url): 
@@ -467,6 +450,30 @@ async def crawl(
                     top_paths = sorted(path_counter.items(), key=lambda x:-x[1])[:5]
                     on_stats(len(uniq_phones), len(uniq_emails), top_paths)
 
+                # ---- Extras (IP/FP) tylko jeśli ustawienie pozwala ----
+                should_collect_extras = True
+                if extras_only_on_phone:
+                    should_collect_extras = bool(phones)
+                if should_collect_extras:
+                    try:
+                        all_text = html or ""
+                        for sc in soup.find_all("script"):
+                            try:
+                                if sc.string:
+                                    all_text += " " + sc.string
+                            except Exception:
+                                pass
+                        for ip in find_ips(all_text):
+                            on_ip(IPHit(ip=ip, url=url))
+                    except Exception:
+                        pass
+                    try:
+                        for label, evid in detect_fingerprint_indicators(html or ""):
+                            on_fp(FPEvent(url=url, indicator=label, evidence=evid[:200]))
+                    except Exception:
+                        pass
+
+                # hits
                 if phones and emails:
                     uname = guess_username(soup) if phones else ""
                     for ph in phones:
@@ -502,14 +509,11 @@ async def crawl(
                 q.task_done()
                 if delay_ms: await asyncio.sleep(delay_ms/1000)
 
-        # odpal workerów
         workers = [asyncio.create_task(worker(i)) for i in range(max(1,concurrency))]
         await asyncio.gather(*workers, return_exceptions=True)
 
-    # export cookies
     if cookies_out_file:
         try:
-            # wybierz najświeższy header
             hdr = cookie_hdr.get(domain.lower()) or next(iter(cookie_hdr.values()), "")
             if hdr:
                 Path(cookies_out_file).parent.mkdir(parents=True, exist_ok=True)
