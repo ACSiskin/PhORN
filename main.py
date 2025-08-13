@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 import sys
 import argparse
 import asyncio
@@ -9,6 +6,8 @@ import csv
 import time
 from datetime import datetime
 import aiohttp
+import signal
+import socket  # dodano DNS/IP domeny
 
 try:
     import yaml  # opcjonalnie dla CLI
@@ -31,6 +30,25 @@ def save_csv(domain: str, hits: list):
             ))
     return fname
 
+# ---------- Uniwersalny CSV stream saver ----------
+class CSVStream:
+    def __init__(self, filename: str, fieldnames: list[str]):
+        self.filename = filename
+        self._f = open(filename, "w", newline="", encoding="utf-8")
+        self._w = csv.DictWriter(self._f, fieldnames=fieldnames)
+        self._w.writeheader()
+        self._closed = False
+    def write(self, row: dict):
+        if self._closed: return
+        self._w.writerow(row); self._f.flush()
+    def close(self):
+        if not self._closed:
+            try: self._f.flush()
+            except Exception: pass
+            try: self._f.close()
+            except Exception: pass
+            self._closed = True
+
 async def detect_netinfo_async(proxy: str | None) -> str:
     timeout = aiohttp.ClientTimeout(total=10, connect=5, sock_connect=5, sock_read=5)
     async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -41,6 +59,42 @@ async def detect_netinfo_async(proxy: str | None) -> str:
     if (not proxy) and v6:
         warn = "  ⚠ IPv6 aktywne — jeśli VPN nie tuneluje IPv6, rozważ wyłączenie IPv6."
     return f"Network: IPv4 {v4 or '-'} | IPv6 {v6 or '-'} ({via}){warn}"
+
+# ---------- STREAMING AUTOSAVE kontaktów ----------
+class StreamSaver:
+    def __init__(self, domain: str, *, dedupe: bool = True):
+        self.filename = f"contacts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        self._f = open(self.filename, "w", newline="", encoding="utf-8")
+        self._w = csv.DictWriter(self._f, fieldnames=["source_domain","username","phone","email","url"])
+        self._w.writeheader()
+        self._dedupe = dedupe
+        self._seen = set() if dedupe else None
+        self._closed = False
+
+    def write_hit(self, h):
+        if self._closed:
+            return
+        key = (getattr(h,"phone",""), getattr(h,"email",""), getattr(h,"url",""))
+        if self._seen is not None:
+            if key in self._seen:
+                return
+            self._seen.add(key)
+        self._w.writerow(dict(
+            source_domain=getattr(h,"source_domain",""),
+            username=getattr(h,"username",""),
+            phone=getattr(h,"phone",""),
+            email=getattr(h,"email",""),
+            url=getattr(h,"url",""),
+        ))
+        self._f.flush()
+
+    def close(self):
+        if not self._closed:
+            try: self._f.flush()
+            except Exception: pass
+            try: self._f.close()
+            except Exception: pass
+            self._closed = True
 
 # -------------------- CLI (opcjonalne) --------------------
 def run_cli(cfg: dict):
@@ -69,19 +123,47 @@ def run_cli(cfg: dict):
         "exclude_re": cfg.get("exclude_re") or "",
         "cookies_in_file": cfg.get("cookies_in_file") or "",
         "cookies_out_file": cfg.get("cookies_out_file") or "",
+        "extras_only_on_phone": bool(cfg.get("extras_only_on_phone", False)),
     }
 
     print(f"[PHORN/CLI] target={domain} mode={mode} max_pages={pages}")
-    hits = loop.run_until_complete(
-        crawl(domain, mode, pages,
-              on_scan=lambda u: print("[SCAN]", u),
-              on_found=lambda h: print("[FOUND]", h.phone, h.email, h.url),
-              on_status=lambda s,q,f,e: print(f"[STAT] scanned={s} q={q} f={f} e={e}"),
-              on_detail=lambda m: print("[DETAIL]", m),
-              **kwargs)
-    )
-    fname = save_csv(domain, hits)
-    print("[PHORN/CLI] saved:", fname)
+    hits_live = []
+    saver = StreamSaver(domain, dedupe=True)
+    ips_csv = CSVStream(f"ips_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", ["ip","url"])
+    fp_csv  = CSVStream(f"fp_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", ["url","indicator","evidence"])
+
+    # graceful SIGTERM
+    def _sigterm_handler(signum, frame):
+        print("\n[PHORN/CLI] SIGTERM — closing files…")
+        try: saver.close(); ips_csv.close(); fp_csv.close()
+        except Exception: pass
+        raise KeyboardInterrupt
+    try:
+        signal.signal(signal.SIGTERM, _sigterm_handler)
+    except Exception:
+        pass
+
+    try:
+        hits = loop.run_until_complete(
+            crawl(
+                domain, mode, pages,
+                on_scan=lambda u: print("[SCAN]", u),
+                on_found=lambda h: (hits_live.append(h), saver.write_hit(h), print("[FOUND]", h.phone, h.email, h.url))[-1],
+                on_status=lambda s,q,f,e: print(f"[STAT] scanned={s} q={q} f={f} e={e}"),
+                on_detail=lambda m: print("[DETAIL]", m),
+                on_ip=lambda ih: ips_csv.write({"ip": ih.ip, "url": ih.url}),
+                on_fp=lambda ev: fp_csv.write({"url": ev.url, "indicator": ev.indicator, "evidence": ev.evidence}),
+                **kwargs
+            )
+        )
+        saver.close(); ips_csv.close(); fp_csv.close()
+        print("[PHORN/CLI] saved (stream):", saver.filename)
+    except KeyboardInterrupt:
+        saver.close(); ips_csv.close(); fp_csv.close()
+        if hits_live:
+            print("\n[PHORN/CLI] Interrupted — partial results in:", saver.filename)
+        else:
+            print("\n[PHORN/CLI] Interrupted — no results.")
 
 # -------------------- TUI --------------------
 def curses_main(stdscr):
@@ -107,7 +189,6 @@ def curses_main(stdscr):
     seed_cookie = ui.prompt(row +14, "Seed Cookie (optional, e.g., cf_clearance=...; __cf_bm=...): ")
     boot_first  = ui.prompt(row +15, "Browser bootstrap first? [y/N]: ")
     aggr_str    = ui.prompt(row +16, "Aggressive CF networking (HTTP/2 + pełne nagłówki)? [y/N]: ")
-    # NOWE:
     conc_str    = ui.prompt(row +17, "Concurrency (HTTP workers, default 1): ")
     robots_str  = ui.prompt(row +18, "Obey robots.txt? [y/N]: ")
     depth_str   = ui.prompt(row +19, "Max depth (empty = unlimited): ")
@@ -115,6 +196,7 @@ def curses_main(stdscr):
     exc_re      = ui.prompt(row +21, "Exclude regex (optional): ")
     cin_path    = ui.prompt(row +22, "Cookies import file (optional): ")
     cout_path   = ui.prompt(row +23, "Cookies export file (optional): ")
+    extras_only = ui.prompt(row +24, "Extras only when phone found? [y/N]: ")
 
     # Parsy
     try: mode = int(mode_str or "1")
@@ -150,6 +232,27 @@ def curses_main(stdscr):
     exclude_re = (exc_re or "").strip()
     cookies_in_file  = (cin_path or "").strip()
     cookies_out_file = (cout_path or "").strip()
+    extras_only_on_phone = (extras_only or "").strip().lower() in ("y","yes","1","true")
+
+    # Rozwiąż IP domeny (A/AAAA); wypisz kilka pierwszych
+    def _resolve_domain_ips(name: str) -> str:
+        ips = set()
+        for fam in (socket.AF_INET, socket.AF_INET6):
+            try:
+                infos = socket.getaddrinfo(name, None, fam, socket.SOCK_STREAM)
+                for res in infos:
+                    addr = res[4][0]
+                    if addr:
+                        ips.add(addr)
+            except Exception:
+                continue
+        if not ips:
+            return "-"
+        # pokaż max 3, posortowane
+        out = sorted(ips)
+        return ", ".join(out[:3]) + (" …" if len(out) > 3 else "")
+
+    domain_ip = _resolve_domain_ips(domain)
 
     # Net info
     loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
@@ -164,6 +267,7 @@ def curses_main(stdscr):
         domain, mode, max_pages,
         netinfo=netinfo,
         options=dict(
+            domain_ip=domain_ip,  # <-- nowa linia: IP domeny
             start_url=start_url or "",
             render_mode=render_mode,
             interactive_unlock=interactive_unlock,
@@ -181,9 +285,15 @@ def curses_main(stdscr):
             exclude_re=exclude_re or "-",
             cookies_in_file=cookies_in_file or "-",
             cookies_out_file=cookies_out_file or "-",
+            extras_only_on_phone=extras_only_on_phone,
         )
     )
     ui.set_start_time(time.time())
+
+    saver = StreamSaver(domain, dedupe=True)
+    ips_csv = CSVStream(f"ips_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", ["ip","url"])
+    fp_csv  = CSVStream(f"fp_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", ["url","indicator","evidence"])
+    hits_live = []
 
     # Callbacks
     def on_scan(url):
@@ -191,6 +301,8 @@ def curses_main(stdscr):
         ui.detail_start(url)
 
     def on_found(hit):
+        hits_live.append(hit)
+        saver.write_hit(hit)
         ui.log_found(hit)
 
     def on_status(s,q,f,e):
@@ -202,36 +314,54 @@ def curses_main(stdscr):
     def on_stats(u_phones,u_emails,top_paths):
         ui.update_stats(u_phones,u_emails,top_paths)
 
+    def on_ip(ih):
+        ui.detail(f"IP found in page: {ih.ip} @ {ih.url}")
+
+    def on_fp(ev):
+        ui.detail(f"FP: {ev.indicator} @ {ev.url}")
+
     # Run
-    hits = loop.run_until_complete(
-        crawl(
-            domain, mode, max_pages,
-            on_scan, on_found, on_status,
-            start_url=(start_url or None),
-            delay_ms=delay_ms,
-            render_mode=render_mode,
-            proxy=proxy,
-            use_sitemap=use_sitemap,
-            interactive_unlock=interactive_unlock,
-            on_detail=on_detail,
-            on_stats=on_stats,
-            interactive_timeout_s=interactive_timeout_s,
-            seed_cookie_header=seed_cookie_header,
-            bootstrap_headful_first=bootstrap_headful_first,
-            aggr_net=aggr_net,
-            concurrency=concurrency,
-            obey_robots=obey_robots,
-            max_depth=max_depth,
-            include_re=include_re,
-            exclude_re=exclude_re,
-            cookies_in_file=cookies_in_file,
-            cookies_out_file=cookies_out_file,
+    try:
+        hits = loop.run_until_complete(
+            crawl(
+                domain, mode, max_pages,
+                on_scan, on_found, on_status,
+                start_url=(start_url or None),
+                delay_ms=delay_ms,
+                render_mode=render_mode,
+                proxy=proxy,
+                use_sitemap=use_sitemap,
+                interactive_unlock=interactive_unlock,
+                on_detail=on_detail,
+                on_stats=on_stats,
+                on_ip=on_ip,
+                on_fp=on_fp,
+                extras_only_on_phone=extras_only_on_phone,
+                interactive_timeout_s=interactive_timeout_s,
+                seed_cookie_header=seed_cookie_header,
+                bootstrap_headful_first=bootstrap_headful_first,
+                aggr_net=aggr_net,
+                concurrency=concurrency,
+                obey_robots=obey_robots,
+                max_depth=max_depth,
+                include_re=include_re,
+                exclude_re=exclude_re,
+                cookies_in_file=cookies_in_file,
+                cookies_out_file=cookies_out_file,
+            )
         )
-    )
-    curses.curs_set(1)
-    fname = save_csv(domain, hits)
-    ui._safe_add(ui.status_row, 0, f"Saved results to {fname}")
-    ui.stdscr.getch()
+        curses.curs_set(1)
+        saver.close(); ips_csv.close(); fp_csv.close()
+        ui._safe_add(ui.status_row, 0, f"Saved (stream) to {saver.filename}")
+        ui.stdscr.getch()
+    except KeyboardInterrupt:
+        curses.curs_set(1)
+        saver.close(); ips_csv.close(); fp_csv.close()
+        if hits_live:
+            ui._safe_add(ui.status_row, 0, f"Interrupted — partial results in {saver.filename}")
+        else:
+            ui._safe_add(ui.status_row, 0, "Interrupted — no results.")
+        ui.stdscr.getch()
 
 if __name__ == "__main__":
     # tryb CLI: --cli --config cfg.yaml
