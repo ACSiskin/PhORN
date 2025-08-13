@@ -111,3 +111,54 @@ def pair_phones_emails(soup: BeautifulSoup, dom_threshold: int = 6) -> tuple[lis
     orphan_emails = [em for i, (_, em) in enumerate(emails) if i not in used_email_idx]
     return paired, orphan_emails
 
+# ---------- IP detection ----------
+# IPv4
+IPV4_RE = re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b")
+# IPv6 (uproszczone)
+IPV6_RE = re.compile(r"\b(?:[A-Fa-f0-9]{1,4}:){2,7}[A-Fa-f0-9]{1,4}\b")
+
+def find_ips(text: str) -> set[str]:
+    ips = set()
+    if not text:
+        return ips
+    for m in IPV4_RE.finditer(text):
+        ips.add(m.group(0))
+    for m in IPV6_RE.finditer(text):
+        ips.add(m.group(0))
+    return ips
+
+# ---------- Fingerprinting indicators ----------
+_FP_PATTERNS = [
+    # biblioteki
+    ("FingerprintJS", r"fingerprintjs|@fingerprintjs"),
+    ("Fingerprint2",  r"fingerprint2"),
+    ("ClientJS",      r"clientjs"),
+    # techniki
+    ("Canvas FP",     r"canvas.*(fingerprint|toDataURL|getImageData)"),
+    ("Audio FP",      r"AudioContext|webkitAudioContext"),
+    ("WebGL FP",      r"webgl|WebGLRenderingContext|getSupportedExtensions\("),
+    ("Fonts FP",      r"measureText|getBBox"),
+    ("Plugins/UA",    r"navigator\.plugins|navigator\.mimeTypes|userAgent"),
+    ("Timezone/Intl", r"Intl\.DateTimeFormat\(.*resolvedOptions"),
+    ("GPU/Memory",    r"hardwareConcurrency|deviceMemory"),
+]
+
+def detect_fingerprint_indicators(html: str) -> list[tuple[str, str]]:
+    """
+    Zwraca listę (indicator, evidence_snippet). Heurystyki – sygnały, nie dowód.
+    """
+    if not html:
+        return []
+    out = []
+    low = html.lower()
+    for label, pat in _FP_PATTERNS:
+        try:
+            rx = re.compile(pat, re.I | re.S)
+            m = rx.search(html)
+            if m:
+                snippet = html[max(0, m.start()-40): m.end()+40]
+                out.append((label, " ".join(snippet.split())))
+        except Exception:
+            if re.search(pat, low):
+                out.append((label, label))
+    return out
