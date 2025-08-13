@@ -8,3 +8,13 @@ class Hit:
     email: str         # "" gdy brak
     url: str
 
+@dataclass(frozen=True)
+class IPHit:
+    ip: str
+    url: str
+
+@dataclass(frozen=True)
+class FPEvent:
+    url: str
+    indicator: str   # np. "FingerprintJS", "Canvas FP"
+    evidence: str    # krótki fragment/kontext
