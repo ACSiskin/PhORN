@@ -1,0 +1,25 @@
+# Core crawling
+aiohttp>=3.8.5
+aiodns>=3.0.0
+beautifulsoup4>=4.12.2
+playwright>=1.44.0
+
+# HTML parsing / extraction
+lxml>=4.9.3
+tldextract>=3.4.0
+
+# UI
+windows-curses; platform_system == "Windows"
+rich>=13.7.0
+blessed>=1.20.0
+
+# Image processing for avatars (ASCII preview)
+Pillow>=10.0.0
+requests>=2.31.0
+
+# Fingerprinting & DNS / IP enrichment
+dnspython>=2.4.2
+ipwhois>=1.2.0
+
+# Utils
+python-dateutil>=2.8.2
