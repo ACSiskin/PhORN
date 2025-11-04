@@ -13,7 +13,7 @@
 **Terminal Phone & Email Crawler (TUI + Playwright)**
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
-[![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
+
 [![Status](https://img.shields.io/badge/OSINT-Tool-orange.svg)](#)
 
 </div>
